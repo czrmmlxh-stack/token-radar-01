@@ -1,4 +1,4 @@
-// Token Radar's dashboard (model radar-2). Reads window.RADAR, written beside
+// Token Radar's dashboard (model radar-3). Reads window.RADAR, written beside
 // dashboard/ by main.ts, and renders the ranked board, a filterable table, a
 // per-protocol detail drawer with the model's own inputs and the protocol's
 // farm plan. No network: every byte it shows is in data.js.
@@ -15,35 +15,51 @@
   var mount = document.getElementById('board');
   var view = { q: '', cat: 'all', chain: 'all', tab: 'pre-token', sortKey: 'implied', sortDir: -1, picked: null };
 
+  // A field the snapshot does not carry is shown as '-', never filled in.
+  var NONE = '-';
   var money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function moneyOf(n) {
-    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
+    if (n === null || n === undefined || !isFinite(n)) return NONE;
     if (Math.abs(n) >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
     if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
     if (Math.abs(n) >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
     return money.format(n);
   }
   function pctOf(n) {
-    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
+    if (n === null || n === undefined || !isFinite(n)) return NONE;
     return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
   }
   function ageOf(days) {
-    if (days === null || days === undefined) return 'unknown';
+    if (days === null || days === undefined) return NONE;
     if (days >= 365) return (days / 365).toFixed(1) + 'y';
     return Math.max(0, Math.round(days)) + 'd';
   }
+  function multOf(n) { return 'x' + n.toFixed(4); }
 
-  // The model in one function: the page recomputes a row from the snapshot
-  // figures and checks the number board.json carries, so the page's code and
-  // the board's data are visibly the same arithmetic.
+  // The valuation multiple a category gets: its own entry in the market
+  // table main.ts measured from the snapshot's live tokens, else the market's.
+  function valuationOf(category) {
+    var m = DATA.market;
+    for (var i = 0; i < m.categories.length; i++) if (m.categories[i].category === category) return m.categories[i];
+    return { category: category, comps: 0, median_multiple: null, multiple: m.multiple, basis: 'market' };
+  }
+
+  // The model in one function, the same arithmetic as impliedValue in
+  // lib/model.ts and in the same order: the page recomputes a row from the
+  // snapshot figures and checks the number board.json carries. A missing
+  // seven-day change or listing date is x1.00, never a made-up figure.
   function impliedOf(row, model) {
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthMult = 1 + (growth / 100) * model.growth_weight;
-    var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
-    var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
+    var market = DATA.market;
+    var multiple = valuationOf(row.category).multiple;
+    var hasGrowth = row.change_7d !== null && row.change_7d !== undefined;
+    var excess = hasGrowth ? Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d - market.change_7d)) : null;
+    var growthMult = excess === null ? 1 : 1 + (excess / 100) * model.growth_weight;
+    var hasAge = row.age_days !== null && row.age_days !== undefined;
+    var maturity = hasAge ? model.maturity_floor + (Math.min(row.age_days, model.maturity_days) / model.maturity_days) * model.maturity_range : 1;
     var extra = Math.min(Math.max((row.chains || []).length - 1, 0), model.chain_max_bonus);
     var chainsMult = 1 + model.chain_step * extra;
-    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity * chainsMult));
+    var familyMult = row.family_token ? model.family_multiplier : 1;
+    return Math.max(1, Math.round(row.tvl_usd * multiple * growthMult * maturity * chainsMult * familyMult));
   }
 
   // Build one element: attrs map class/text/html/on*/anything to the matching
@@ -263,7 +279,7 @@
     var max = list[0].implied_value_usd || 1;
     var tbody = h('tbody');
     list.forEach(function (r) {
-      var growth = r.change_7d === null ? 'n/a' : pctOf(r.change_7d);
+      var growth = pctOf(r.change_7d);
       var growthClass = r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg';
       var tr = h('tr', {
         'data-selected': view.picked === r.slug ? 'true' : 'false',
@@ -316,7 +332,7 @@
         h('td', { class: 'num', text: 'live' }),
         h('td', null, h('div', { class: 'name' }, h('b', { text: r.name }), h('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') }))),
         h('td', { class: 'num', text: moneyOf(r.tvl_usd) }),
-        h('td', { class: 'num ' + (r.change_7d !== null && r.change_7d >= 0 ? 'pos' : 'neg'), text: pctOf(r.change_7d) }),
+        h('td', { class: 'num ' + (r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg'), text: pctOf(r.change_7d) }),
         h('td', { class: 'num', text: moneyOf(r.mcap_usd) }),
         h('td', null, h('span', { class: 'status live', text: 'already trades' }))
       ));
@@ -334,18 +350,25 @@
 
   function modelExplainer() {
     var m = DATA.model;
+    var mk = DATA.market;
+    var own = mk.categories.filter(function (c) { return c.basis === 'category'; }).map(function (c) {
+      return c.category + ' ' + multOf(c.multiple) + ' (' + c.comps + ' comps)';
+    });
     return h('section', { class: 'panel model' },
       h('h2', { text: 'How implied value is computed' }),
-      h('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
+      h('p', { class: 'sub', text: 'Implied value is what the token would be worth if it launched today and the market priced it like the live tokens in this same snapshot. Every row is scored by one function of the snapshot figures; no protocol name is special-cased, and no row is hand-picked.' }),
       h('div', { class: 'formula' },
-        'implied = round( tvl_usd x ', h('b', { text: String(m.base_multiple) }),
-        ' x (1 + clamp(change_7d, ', h('b', { text: String(m.growth_floor) }), ', ', h('b', { text: String(m.growth_cap) }),
+        'implied = round( tvl_usd',
+        ' x valuation_multiple(category)',
+        ' x (1 + clamp(change_7d ' + (mk.change_7d < 0 ? '+ ' : '- '), h('b', { text: Math.abs(mk.change_7d).toFixed(2) }), ', ', h('b', { text: String(m.growth_floor) }), ', ', h('b', { text: String(m.growth_cap) }),
         ') / 100 x ', h('b', { text: String(m.growth_weight) }),
         ') x (', h('b', { text: String(m.maturity_floor) }), ' + min(age_days, ', h('b', { text: String(m.maturity_days) }),
         ') / ', h('b', { text: String(m.maturity_days) }), ' x ', h('b', { text: String(m.maturity_range) }),
-        ') x (1 + ', h('b', { text: String(m.chain_step) }), ' x min(chains - 1, ', h('b', { text: String(m.chain_max_bonus) }), ')) )'
+        ') x (1 + ', h('b', { text: String(m.chain_step) }), ' x min(chains - 1, ', h('b', { text: String(m.chain_max_bonus) }), '))',
+        ' x (', h('b', { text: String(m.family_multiplier) }), ' if a same-brand protocol already trades a token, else 1) )'
       ),
-      h('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Chains counts the chains the snapshot lists for the protocol: wider distribution reaches more wallets. The early radar is every pre-token protocol the snapshot can rank, not just the top of the list, and the live-token protocols are set aside with their market caps shown.' })
+      h('p', { class: 'sub', text: 'Valuation multiple: the median market cap / TVL of the snapshot’s ' + mk.comps + ' live tokens that report both, ' + multOf(mk.multiple) + '. A category with at least ' + m.min_category_comps + ' live comparables gets its own median, shrunk toward the market by ' + m.prior_weight + ' pseudo-comparables: ' + (own.length ? own.join(', ') : 'none') + '. Every other category uses the market multiple.' }),
+      h('p', { class: 'sub', text: 'Growth is the protocol’s seven-day TVL change minus the median change of the ' + mk.change_7d_count + ' protocols that report one (' + pctOf(mk.change_7d) + '), so a market-wide move is not read as momentum. Maturity is how long DefiLlama has tracked the protocol with no token on record: TVL that has stayed two years is sticky, TVL that arrived last month often leaves at the airdrop. Chains is distribution. A missing seven-day change or listing date is x1.00 and shows as ‘-’: nothing is filled in. The live-token protocols are set aside with their market caps shown.' })
     );
   }
 
@@ -360,6 +383,8 @@
     dialog.textContent = '';
     var steps = farmSteps(row);
     var recomputed = impliedOf(row, DATA.model);
+    var val = valuationOf(row.category);
+    var valNote = val.basis === 'category' ? (row.category + ', ' + val.comps + ' comps') : ('market, ' + DATA.market.comps + ' comps');
     dialog.appendChild(h('div', { class: 'detail-head' },
       h('div', null,
         h('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + (row.watchlist ? ' · watchlist' : ' · early radar') }),
@@ -375,11 +400,14 @@
         h('div', null, h('span', { text: 'Seven-day growth' }), h('b', { class: 'num', text: pctOf(row.change_7d) })),
         h('div', null, h('span', { text: 'Age with no token' }), h('b', { class: 'num', text: ageOf(row.age_days) })),
         h('div', null, h('span', { text: 'Chains' }), h('b', { class: 'num', text: String((row.chains || []).length) })),
-        h('div', null, h('span', { text: 'Growth multiplier' }), h('b', { class: 'num', text: String(row.growth_multiplier) })),
-        h('div', null, h('span', { text: 'Maturity multiplier' }), h('b', { class: 'num', text: String(row.maturity_multiplier) })),
-        h('div', null, h('span', { text: 'Chains multiplier' }), h('b', { class: 'num', text: String(row.chains_multiplier) })),
+        h('div', null, h('span', { text: 'Valuation multiple (' + valNote + ')' }), h('b', { class: 'num', text: multOf(row.valuation_multiple) })),
+        h('div', null, h('span', { text: 'Growth multiplier' }), h('b', { class: 'num', text: multOf(row.growth_multiplier) })),
+        h('div', null, h('span', { text: 'Maturity multiplier' }), h('b', { class: 'num', text: multOf(row.maturity_multiplier) })),
+        h('div', null, h('span', { text: 'Chains multiplier' }), h('b', { class: 'num', text: multOf(row.chains_multiplier) })),
+        h('div', null, h('span', { text: 'Family multiplier' }), h('b', { class: 'num', text: multOf(row.family_multiplier) })),
         h('div', { class: 'total' }, h('span', { text: 'Implied value' }), h('b', { class: 'num', text: moneyOf(row.implied_value_usd) }))
       ),
+      row.family_token ? h('p', { class: 'sub', text: 'Same brand already trades: ' + row.family_token.name + ' (' + row.family_token.symbol + ') is in the snapshot with a token, so this product most likely accrues to that token and keeps x' + DATA.model.family_multiplier + ' of its value.' }) : null,
       h('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + moneyOf(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and no token is promised.' })
     ));
     dialog.appendChild(h('section', { class: 'detail-section' },
